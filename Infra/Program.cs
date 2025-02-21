@@ -26,29 +26,38 @@ var tags = new[]
 };
 var replicationLag = Metrics.Meter.CreateHistogram<double>("replication.lag", "ms");
 var dbQueryDuration = Metrics.Meter.CreateHistogram<double>("db.query.duration", "ms");
+var dbErrors = Metrics.Meter.CreateCounter<int>("db.errors");
 
 
 while (true)
 {
-    // Logging
-    logger.LogInformation($"Current serial number = {serialNumber}");
+    try
+    {
+        // Logging
+        logger.LogInformation($"Current serial number = {serialNumber}");
 
-    var startQueryDb = DateTime.UtcNow;
-    var record = dbContext.JournalOperations.Where(op => op.OperationId > serialNumber).Take(maxChanges).ToList().LastOrDefault();
-    dbQueryDuration.Record((DateTime.UtcNow - startQueryDb).TotalMilliseconds);
-    
-    if (record != null)
+        var startQueryDb = DateTime.UtcNow;
+        var record = dbContext.JournalOperations.Where(op => op.OperationId > serialNumber).Take(maxChanges).ToList()
+            .LastOrDefault();
+        dbQueryDuration.Record((DateTime.UtcNow - startQueryDb).TotalMilliseconds);
+
+        if (record != null)
+        {
+            serialNumber = record.OperationId;
+            var lag = (DateTime.UtcNow - record.CreatedAt).TotalMilliseconds;
+            logger.LogInformation($"Last state read {record.OperationId}, lag (ms)={lag}");
+            replicationLag.Record(lag, tags!);
+        }
+        else
+        {
+            logger.LogInformation("No new record found, lag (ms)=0");
+            replicationLag.Record(0, tags!);
+        }
+    } catch (Npgsql.PostgresException e)
     {
-        serialNumber = record.OperationId;
-        var lag = (DateTime.UtcNow - record.CreatedAt).TotalMilliseconds;
-        logger.LogInformation($"Last state read {record.OperationId}, lag (ms)={lag}");
-        replicationLag.Record(lag, tags!);
+        logger.LogError(e, "Postgres error");
+        dbErrors.Add(1);
     }
-    else
-    {
-        logger.LogInformation("No new record found, lag (ms)=0");
-        replicationLag.Record(0, tags!);
-    }
-    
+
     Thread.Sleep(sleepTime);
 }
